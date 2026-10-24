@@ -123,24 +123,43 @@
   const speed = matchMedia("(prefers-reduced-motion: reduce)").matches ? .3 : 1;
   const fallBack = () => root.classList.add("no-gl");
 
-  // The surface colour, and the browser toolbar's, follow the viewer's local time of day.
+  // The surface colour, and the browser toolbar's, follow today's sunrise and sunset.
+  // Each colour is pinned some hours from sunrise (r), solar noon (n) or sunset (s).
   const SKY = [
-    [0,    [0.055, 0.060, 0.105]],  // midnight ink
-    [5,    [0.110, 0.105, 0.190]],  // pre-dawn
-    [7,    [0.880, 0.760, 0.740]],  // dawn peach
-    [12,   [0.840, 0.880, 0.930]],  // midday pearl
-    [17,   [0.900, 0.810, 0.700]],  // late-afternoon sand
-    [19.5, [0.470, 0.380, 0.560]],  // dusk lilac
-    [22,   [0.085, 0.085, 0.150]],  // night
-    [24,   [0.055, 0.060, 0.105]],
+    ["n", -12,  [0.055, 0.060, 0.105]],  // midnight ink
+    ["r", -1,   [0.110, 0.105, 0.190]],  // pre-dawn
+    ["r", .5,   [0.880, 0.760, 0.740]],  // dawn peach
+    ["n", 0,    [0.840, 0.880, 0.930]],  // midday pearl
+    ["s", -1.5, [0.900, 0.810, 0.700]],  // late-afternoon sand
+    ["s", .25,  [0.470, 0.380, 0.560]],  // dusk lilac
+    ["s", 1.5,  [0.085, 0.085, 0.150]],  // night
+    ["n", 12,   [0.055, 0.060, 0.105]],
   ];
+  // Where the viewer is stays private, so assume Britain's latitude, flipped south of the
+  // equator (where clocks go forward in January), and that the sun peaks at noon standard time.
+  const LATITUDE = 51.5;
+  const year = new Date().getFullYear();
+  const offsets = [0, 6].map(month => new Date(year, month, 1).getTimezoneOffset());
+  const lat = LATITUDE * (offsets[0] < offsets[1] ? -1 : 1) * Math.PI / 180;
+  // Sunrise, solar noon and sunset on this date, in local clock hours.
+  function sunOn(d) {
+    const day = (d - new Date(d.getFullYear(), 0, 1)) / 864e5;
+    const tilt = -23.44 * Math.PI / 180 * Math.cos(2 * Math.PI * (day + 10) / 365);
+    const cosH = (Math.sin(-.833 * Math.PI / 180) - Math.sin(lat) * Math.sin(tilt)) / (Math.cos(lat) * Math.cos(tilt));
+    const half = Math.acos(Math.min(Math.max(cosH, -1), 1)) * 12 / Math.PI;
+    const n = 12 + (Math.max(...offsets) - d.getTimezoneOffset()) / 60;
+    return { r: n - half, n, s: n + half };
+  }
   const toolbar = document.querySelector('meta[name="theme-color"]');
   function skyNow() {
     const d = new Date();
-    const h = d.getHours() + d.getMinutes() / 60;
+    const sun = sunOn(d);
+    // Count hours from solar midnight, so the table runs in order whatever the clocks say.
+    const h = ((d.getHours() + d.getMinutes() / 60 - sun.n + 12) % 24 + 24) % 24;
+    const stops = SKY.map(([from, after, colour]) => [sun[from] - sun.n + 12 + after, colour]);
     let i = 0;
-    while (SKY[i + 1][0] <= h) i++;
-    const [h0, a] = SKY[i], [h1, b] = SKY[i + 1];
+    while (stops[i + 1][0] <= h) i++;
+    const [h0, a] = stops[i], [h1, b] = stops[i + 1];
     const k = (h - h0) / (h1 - h0);
     const s = a.map((v, j) => v + (b[j] - v) * k);
     const css = `rgb(${s.map(v => Math.round(v * 255)).join(",")})`;
