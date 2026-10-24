@@ -25,7 +25,7 @@
   :root {
     --sky: #11121d;      /* replaced live by the time-of-day colour */
     --ink: #f4f3f8;
-    --display: "Sora", "Segoe UI", system-ui, sans-serif;
+    --display: "Sora", monospace;   /* if Sora fails, a terminal font: where "hello, world" traditionally appears */
     color-scheme: dark;
   }
   html, body { height: 100%; }
@@ -53,7 +53,7 @@
     display: grid;
     place-items: center;
     text-align: center;
-    font: 400 clamp(2.5rem, 12vw, 9rem)/1.05 var(--display);
+    font: 400 clamp(2.5rem, 9vw, 9rem)/1.05 var(--display);
     letter-spacing: -.02em;
     opacity: .9;
     pointer-events: none;
@@ -74,7 +74,7 @@
     h1 br { display: none; }
   }
   @media (orientation: portrait) {
-    h1 { font-size: clamp(2.5rem, 19vw, 9rem); }
+    h1 { font-size: clamp(2.5rem, 18vw, 9rem); }
   }
 
   /* Without WebGL: slow pastel blooms in CSS. */
@@ -107,7 +107,8 @@
 <script>
 (() => {
   const WORDS = "hello, world";
-  const font = size => `400 ${size}px Sora, "Segoe UI", system-ui, sans-serif`;
+  const DISPLAY = getComputedStyle(document.documentElement).getPropertyValue("--display");
+  const font = size => `400 ${size}px ${DISPLAY}`;
   const touch = matchMedia("(pointer: coarse)").matches;   // phones and tablets
   const MAX_SCALE = touch ? 2 : 3;   // render sharpness cap; 2× keeps phones smooth
   const LIGHTS = 3;          // coloured lights that always wander
