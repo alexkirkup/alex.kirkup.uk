@@ -117,6 +117,7 @@
   const LETTER_TIME = 2800;  // ms for each letter to rise out of the surface
   const SPREAD = 3600;       // ms from the first letter starting to rise to the last
   const PAUSE = 400;         // ms of that spent pausing between words
+  const LETTERS = WORDS.replace(/ /g, "").length;
 
   const root = document.documentElement;
   const canvas = document.getElementById("field");
@@ -183,6 +184,7 @@
     #endif
     #define LIGHTS ${LIGHTS}
     #define WAVES ${WAVES}
+    #define LETTERS ${LETTERS}
 
     // Positions are fractions of the screen, y up.
     uniform vec2 uRes;
@@ -192,8 +194,10 @@
     uniform vec4 uWaves[WAVES];     // x, y, start time, hue
     uniform vec3 uSky;
     uniform float uRise;            // seconds since the words began rising; negative before
-    uniform sampler2D uText;        // r: crisp letters, g: soft bevel, b: shadow
-    uniform sampler2D uOrder;       // r: when the letters here rise, 0 for the first to 1 for the last
+    uniform sampler2D uText1;       // alternate letters, so neighbours are never in the same map:
+    uniform sampler2D uText2;       //   r: crisp letters, g: soft bevel, b: shadow
+    uniform vec4 uInk[LETTERS];     // where each letter is drawn, in pixels: left, bottom, right, top
+    uniform float uWhen[LETTERS];   // when each letter rises, 0 for the first to 1 for the last
 
     const vec3 VIEW = vec3(0., 0., 1.);
     const float FOLD_DEPTH = .15;
@@ -256,12 +260,28 @@
       return c.b * (mound + rings);
     }
 
-    // The letters here: x their height, y the liquid stirred around them, z how much they shade
+    // Letters from one map: x their height, y the liquid stirred around them, z how much they shade
     // what lies beside them.
-    vec3 raised(vec2 s) {
-      vec3 c = texture2D(uText, s).rgb;
-      float k = phase(texture2D(uOrder, s).r);
+    vec3 letters(vec3 c, float k) {
       return vec3((c.r * .35 + c.g * .65) * risen(k), wake(c, k), c.b * risen(k));
+    }
+
+    // Each point rises on the time of the nearest letter in each map. Letters in the same map are
+    // never close enough for their shadows to meet, so it switches from one to the next unseen.
+    vec3 raised(vec2 s) {
+      vec2 px = s * uRes;
+      vec2 nearest = vec2(1e9), when = vec2(0.);
+      for (int i = 0; i < LETTERS; i++) {
+        vec2 gap = max(max(uInk[i].xy - px, px - uInk[i].zw), 0.);
+        float d = dot(gap, gap);
+        if (mod(float(i), 2.) < .5) {
+          if (d < nearest.x) { nearest.x = d; when.x = uWhen[i]; }
+        } else if (d < nearest.y) {
+          nearest.y = d; when.y = uWhen[i];
+        }
+      }
+      return letters(texture2D(uText1, s).rgb, phase(when.x))
+           + letters(texture2D(uText2, s).rgb, phase(when.y));
     }
 
     // A click sends one broad swell rolling out to the edges of the screen.
@@ -375,7 +395,7 @@
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
     u = {};
-    for (const name of ["uRes", "uTime", "uPointer", "uLights", "uWaves", "uSky", "uRise", "uText", "uOrder"]) {
+    for (const name of ["uRes", "uTime", "uPointer", "uLights", "uWaves", "uSky", "uRise", "uText1", "uText2", "uInk", "uWhen"]) {
       u[name] = gl.getUniformLocation(prog, name);
     }
 
@@ -388,8 +408,8 @@
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     }
-    gl.uniform1i(u.uText, 0);
-    gl.uniform1i(u.uOrder, 1);
+    gl.uniform1i(u.uText1, 0);
+    gl.uniform1i(u.uText2, 1);
   }
   try {
     setUp();
@@ -397,16 +417,9 @@
     return fallBack();
   }
 
-  // The words become a height map: crisp shape, soft bevel and shadow in three channels.
+  // The words become height maps: crisp shape, soft bevel and shadow in three channels.
   const text = document.createElement("canvas");
   const tctx = text.getContext("2d");
-  // A second map says when the letters at each point rise. Each point takes the average of the
-  // letters' times, weighted by how much of each one's shadow reaches it: a letter's own time on
-  // and around it, blending smoothly between letters, so nothing shows a seam as they rise in turn.
-  // It changes slowly, so a quarter of the resolution will do.
-  const ORDER_SCALE = .25;
-  const order = document.createElement("canvas");
-  const octx = order.getContext("2d", { willReadFrequently: true });
   const upload = (unit, source) => {
     gl.activeTexture(gl.TEXTURE0 + unit);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, source);
@@ -424,14 +437,17 @@
 
     // Where each letter sits, and whether it starts a word: after a space, or on a later line.
     tctx.font = font(size);
+    tctx.textBaseline = "middle";
     const letters = lines.flatMap((line, i) => {
-      const left = w / 2 - tctx.measureText(line).width / 2;
+      const start = w / 2 - tctx.measureText(line).width / 2;
       return [...line].flatMap((char, j) => {
         if (char === " ") return [];
-        const x = left + tctx.measureText(line.slice(0, j)).width;
+        const x = start + tctx.measureText(line.slice(0, j)).width;
+        const y = top + i * lead;
         const ink = tctx.measureText(char);
-        const mid = x + (ink.actualBoundingBoxRight - ink.actualBoundingBoxLeft) / 2;
-        return [{ char, x, y: top + i * lead, mid, newWord: j ? line[j - 1] === " " : i > 0 }];
+        const left = x - ink.actualBoundingBoxLeft, right = x + ink.actualBoundingBoxRight;
+        const box = [left, h - y - ink.actualBoundingBoxDescent, right, h - y + ink.actualBoundingBoxAscent];
+        return [{ char, x, y, box, mid: (left + right) / 2, newWord: j ? line[j - 1] === " " : i > 0 }];
       });
     });
 
@@ -446,52 +462,31 @@
     for (const letter of letters) {
       letter.when = (letter.along / along * (SPREAD - pauses * PAUSE) + letter.pauses * PAUSE) / SPREAD;
     }
+    gl.uniform4fv(u.uInk, letters.flatMap(letter => letter.box));
+    gl.uniform1fv(u.uWhen, letters.map(letter => letter.when));
 
     // Each channel is a shadow of the letters drawn off-canvas, blurred by a different amount,
     // and added up. Even the crisp one is softened slightly: a hard edge lights up as stair
-    // steps on diagonals. Shadows ignore scaling, so their blur and offset are scaled by hand.
-    function paint(ctx, zoom, layers, which = letters) {
-      ctx.setTransform(zoom, 0, 0, zoom, 0, 0);
-      ctx.globalCompositeOperation = "source-over";
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, w, h);
-      ctx.globalCompositeOperation = "lighter";
-      ctx.font = font(size);
-      ctx.textBaseline = "middle";
-      ctx.shadowOffsetX = w * 2 * zoom;
-      for (const [blur, colour] of layers) {
-        ctx.shadowColor = colour;
-        ctx.shadowBlur = size * blur * zoom;
-        for (const letter of which) ctx.fillText(letter.char, letter.x - w * 2, letter.y);
+    // steps on diagonals.
+    function paint(which) {
+      tctx.globalCompositeOperation = "source-over";
+      tctx.fillStyle = "#000";
+      tctx.fillRect(0, 0, w, h);
+      tctx.globalCompositeOperation = "lighter";
+      tctx.shadowOffsetX = w * 2;
+      for (const [blur, colour] of [[.01125, "#f00"], [.06, "#0f0"], [.12, "#00f"]]) {
+        tctx.shadowColor = colour;
+        tctx.shadowBlur = size * blur;
+        for (const letter of which) tctx.fillText(letter.char, letter.x - w * 2, letter.y);
       }
     }
-    paint(tctx, 1, [[.01125, "#f00"], [.06, "#0f0"], [.12, "#00f"]]);
-    upload(0, text);
 
-    // Weigh up each letter in turn, then divide out the weights.
-    const ow = order.width = Math.ceil(w * ORDER_SCALE), oh = order.height = Math.ceil(h * ORDER_SCALE);
-    const sums = new Float32Array(ow * oh * 2);   // time × weight, weight
-    for (const letter of letters) {
-      paint(octx, ORDER_SCALE, [[.12, "#fff"]], [letter]);
-      const weights = octx.getImageData(0, 0, ow, oh).data;
-      const cx = letter.mid * ORDER_SCALE, cy = letter.y * ORDER_SCALE, reach = size * ORDER_SCALE;
-      for (let y = 0, p = 0; y < oh; y++) {
-        for (let x = 0; x < ow; x++, p += 2) {
-          // The nearest letter always counts a little, even beyond its shadow, so every point has
-          // a time. A point with none would rise at the start, outlining the letters early.
-          const weight = weights[p * 2] + .1 / (1 + ((x - cx) ** 2 + (y - cy) ** 2) / reach ** 2);
-          sums[p] += weight * letter.when;
-          sums[p + 1] += weight;
-        }
-      }
+    // Alternate letters go in separate maps, so each letter's bevel, bulge, ripples and shadow
+    // rise on its own time, even where they spread over its neighbours.
+    for (const g of [0, 1]) {
+      paint(letters.filter((letter, n) => n % 2 === g));
+      upload(g, text);
     }
-    const times = octx.createImageData(ow, oh);
-    for (let p = 0; p < sums.length; p += 2) {
-      times.data[p * 2] = 255 * sums[p] / sums[p + 1];
-      times.data[p * 2 + 3] = 255;
-    }
-    octx.putImageData(times, 0, 0);
-    upload(1, order);
   }
 
   // Positions are fractions of the screen, y up, so they survive resizing.
