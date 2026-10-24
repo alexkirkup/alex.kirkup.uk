@@ -1,7 +1,479 @@
 <!doctype html>
 <html lang="en">
+<head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>alex.kirkup.uk</title>
-<body></body>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Alex Kirkup</title>
+<meta name="theme-color" content="#11121d">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://alex.kirkup.uk/">
+<meta property="og:title" content="Alex Kirkup">
+<meta property="og:image" content="https://alex.kirkup.uk/share.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The words hello, world raised out of a softly lit, iridescent surface.">
+<meta name="twitter:card" content="summary_large_image">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@400&display=swap">
+<style>
+  /* A lit liquid surface fills the screen; the words are raised out of it. */
+  :root {
+    --sky: #11121d;      /* replaced live by the time-of-day colour */
+    --ink: #f4f3f8;
+    --display: "Sora", monospace;   /* if Sora fails, a terminal font: where "hello, world" traditionally appears */
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    overflow: hidden;
+    background: var(--sky);
+    color: var(--ink);
+  }
+  canvas {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    touch-action: none;
+  }
+  /* Plain text until the animation starts and draws the words into the surface. */
+  h1 {
+    position: fixed;
+    inset: 0;
+    margin: 0;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    display: grid;
+    place-items: center;
+    text-align: center;
+    font: 400 clamp(2.5rem, 9vw, 9rem)/1.05 var(--display);
+    letter-spacing: -.02em;
+    opacity: .9;
+    pointer-events: none;
+  }
+  /* Once animating, this copy stays only for screen readers. */
+  .gl h1 {
+    inset: auto;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* Upright screens stack the words, breaking after the comma. */
+  @media (orientation: landscape) {
+    h1 br { display: none; }
+  }
+  @media (orientation: portrait) {
+    h1 { font-size: clamp(2.5rem, 18vw, 9rem); }
+  }
+
+  /* Without WebGL: slow pastel blooms in CSS. */
+  .no-gl canvas { display: none; }
+  .no-gl body::before {
+    content: "";
+    position: fixed;
+    inset: -25%;
+    background:
+      radial-gradient(circle at 30% 35%, #f6b8d0 0, transparent 35%),
+      radial-gradient(circle at 70% 30%, #b8e6f6 0, transparent 35%),
+      radial-gradient(circle at 55% 75%, #d6f6b8 0, transparent 35%),
+      radial-gradient(circle at 25% 75%, #cdb8f6 0, transparent 35%);
+    filter: blur(70px);
+    opacity: .35;
+    animation: drift 40s linear infinite;
+  }
+  @keyframes drift {
+    to { transform: rotate(360deg); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .no-gl body::before { animation: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="field" aria-hidden="true"></canvas>
+<h1>hello, <br>world</h1>
+
+<script>
+(() => {
+  const WORDS = "hello, world";
+  const DISPLAY = getComputedStyle(document.documentElement).getPropertyValue("--display");
+  const font = size => `400 ${size}px ${DISPLAY}`;
+  const touch = matchMedia("(pointer: coarse)").matches;   // phones and tablets
+  const MAX_SCALE = touch ? 2 : 3;   // render sharpness cap; 2× keeps phones smooth
+  const LIGHTS = 3;          // coloured lights that always wander
+  const WAVES = touch ? 10 : 20;     // most colour waves rolling at once
+  const IDLE_AFTER = 5000;   // ms without input before the key light drifts on its own
+  const RISE_TIME = 3000;    // ms for the words to rise out of the surface
+
+  const root = document.documentElement;
+  const canvas = document.getElementById("field");
+  const gl = canvas.getContext("webgl", { antialias: false, alpha: false });
+  const portrait = matchMedia("(orientation: portrait)");
+  const speed = matchMedia("(prefers-reduced-motion: reduce)").matches ? .3 : 1;
+  const fallBack = () => root.classList.add("no-gl");
+
+  // The surface colour, and the browser toolbar's, follow the viewer's local time of day.
+  const SKY = [
+    [0,    [0.055, 0.060, 0.105]],  // midnight ink
+    [5,    [0.110, 0.105, 0.190]],  // pre-dawn
+    [7,    [0.880, 0.760, 0.740]],  // dawn peach
+    [12,   [0.840, 0.880, 0.930]],  // midday pearl
+    [17,   [0.900, 0.810, 0.700]],  // late-afternoon sand
+    [19.5, [0.470, 0.380, 0.560]],  // dusk lilac
+    [22,   [0.085, 0.085, 0.150]],  // night
+    [24,   [0.055, 0.060, 0.105]],
+  ];
+  const toolbar = document.querySelector('meta[name="theme-color"]');
+  function skyNow() {
+    const d = new Date();
+    const h = d.getHours() + d.getMinutes() / 60;
+    let i = 0;
+    while (SKY[i + 1][0] <= h) i++;
+    const [h0, a] = SKY[i], [h1, b] = SKY[i + 1];
+    const k = (h - h0) / (h1 - h0);
+    const s = a.map((v, j) => v + (b[j] - v) * k);
+    const css = `rgb(${s.map(v => Math.round(v * 255)).join(",")})`;
+    root.style.setProperty("--sky", css);
+    toolbar.content = css;
+    return s;
+  }
+  let sky = skyNow();
+  setInterval(() => { sky = skyNow(); }, 60000);
+
+  if (!gl) return fallBack();
+
+  const vert = `attribute vec2 p; void main(){ gl_Position = vec4(p, 0., 1.); }`;
+  const frag = `
+    #ifdef GL_FRAGMENT_PRECISION_HIGH
+    precision highp float;
+    #else
+    precision mediump float;
+    #endif
+    #define LIGHTS ${LIGHTS}
+    #define WAVES ${WAVES}
+
+    // Positions are fractions of the screen, y up.
+    uniform vec2 uRes;
+    uniform float uTime;
+    uniform vec2 uPointer;
+    uniform vec3 uLights[LIGHTS];   // x, y, hue
+    uniform vec4 uWaves[WAVES];     // x, y, start time, hue
+    uniform vec3 uSky;
+    uniform float uRise;
+    uniform sampler2D uText;        // r: crisp letters, g: soft bevel, b: shadow
+
+    const vec3 VIEW = vec3(0., 0., 1.);
+    const float FOLD_DEPTH = .15;
+    const float SWELL_DEPTH = .08;
+    const float LETTER_DEPTH = .012;
+    const float SHADOW_REACH = .012;
+    const float LIGHT_STRENGTH = .5;
+    const float WAVE_DEPTH = .07;
+    const float WAVE_WIDTH = 28.;
+    const float WAVE_SPEED = .45;
+    const float WAVE_LIFE = 5.;
+
+    vec2 toSpace(vec2 px) { return (px - .5 * uRes) / min(uRes.x, uRes.y); }
+    vec2 fromScreen(vec2 f) { return toSpace(f * uRes); }
+    vec3 spectrum(float t) { return .5 + .5 * cos(6.28318 * (t + vec3(0., .33, .67))); }
+
+    // Long, slow folds, like silk under water. Their depth breathes over time.
+    float folds(vec2 p) {
+      float t = uTime;
+      vec2 q = p + .22 * vec2(sin(p.y * 1.6 + t * .3), sin(p.x * 1.3 - t * .26));
+      return (.5 + .12 * sin(t * .07)) * sin(q.x * 2. + t * .2)
+           + (.3 + .1 * sin(t * .05 + 2.)) * sin(q.y * 2.6 - t * .17 + q.x * 1.2)
+           + .2 * sin((q.x - q.y) * 3.4 + t * .29);
+    }
+
+    // Every fifty seconds or so, a low swell rolls across from a new direction.
+    float swell(vec2 p) {
+      float pass = uTime * .12 + 1.;
+      float angle = floor(pass / 6.) * 2.4;
+      float front = mod(pass, 6.) - 3.;
+      float x = dot(p, vec2(cos(angle), sin(angle)));
+      return exp(-(x - front) * (x - front) * 4.);
+    }
+
+    float letters(vec2 s) {
+      vec3 c = texture2D(uText, s).rgb;
+      return (c.r * .35 + c.g * .65) * uRise;
+    }
+
+    // A click sends one broad swell rolling out to the edges of the screen.
+    // Returns its height here, and which way its crest lies from this point.
+    float crest(vec4 w, vec2 p, out vec2 toward) {
+      toward = vec2(0.);
+      float age = uTime - w.z;
+      if (age < 0. || age > WAVE_LIFE) return 0.;
+      vec2 r = p - fromScreen(w.xy);
+      float dist = sqrt(dot(r, r) + .002);   // softened so the centre has no sharp point
+      float d = dist - age * WAVE_SPEED;
+      toward = -sign(d) * r / dist;
+      return exp(-d * d * WAVE_WIDTH) * smoothstep(0., .4, age)
+           * (1. - smoothstep(WAVE_LIFE * .5, WAVE_LIFE, age));
+    }
+
+    float surface(vec2 px, float fold) {
+      vec2 p = toSpace(px);
+      float h = fold * FOLD_DEPTH + swell(p) * SWELL_DEPTH + letters(px / uRes) * LETTER_DEPTH;
+      vec2 toward;
+      for (int i = 0; i < WAVES; i++) h += crest(uWaves[i], p, toward) * WAVE_DEPTH;
+      return h;
+    }
+
+    // How much the raised letters block a light at screen position light from reaching this point.
+    float shadow(vec2 s, vec2 light, float lift) {
+      vec2 d = light - s;
+      return texture2D(uText, s + d / (length(d) + .05) * SHADOW_REACH).b * uRise * (1. - lift);
+    }
+
+    void main() {
+      vec2 px = gl_FragCoord.xy;
+      vec2 p = toSpace(px);
+      vec2 s = px / uRes;
+      float e = 1.5;
+      float unit = e / min(uRes.x, uRes.y);
+
+      float fold = folds(p);
+      float h = surface(px, fold);
+      float hx = surface(px + vec2(e, 0.), folds(toSpace(px + vec2(e, 0.))));
+      float hy = surface(px + vec2(0., e), folds(toSpace(px + vec2(0., e))));
+      vec3 n = normalize(vec3(-(hx - h) / unit, -(hy - h) / unit, 1.));
+      float lift = letters(s);
+
+      // Key light: white, hovering above the pointer.
+      vec3 key = vec3(fromScreen(uPointer), .75);
+      vec3 L = normalize(key - vec3(p, h));
+      float diff = dot(n, L) * .5 + .5;
+      float spec = pow(max(dot(reflect(-L, n), VIEW), 0.), 70.);
+      float rim = pow(1. - n.z, 1.3);
+
+      vec3 film = .48 + .52 * spectrum(fold * .45 + p.x * .12 + dot(n.xy, vec2(.8, .5)) * 1.6 + uTime * .015);
+      vec3 col = uSky * (.66 + .46 * diff);
+      col = mix(col, film, clamp(.2 + rim * 1.1, 0., .5));
+      col = mix(col, vec3(1.), lift * .12);
+      col += spec * .3;
+      col *= 1. - .22 * shadow(s, uPointer, lift);
+      col += film * exp(-dot(p - key.xy, p - key.xy) * 4.) * .06;
+
+      // Coloured lights skim low over the surface, so the letters cast long shadows.
+      for (int i = 0; i < LIGHTS; i++) {
+        vec3 l = uLights[i];
+        vec3 to = vec3(fromScreen(l.xy), .3) - vec3(p, h);
+        vec3 Li = normalize(to);
+        float reach = LIGHT_STRENGTH / (1. + dot(to.xy, to.xy) * 14.);
+        float lit = max(dot(n, Li), 0.) * .5 + pow(max(dot(reflect(-Li, n), VIEW), 0.), 24.) * .2;
+        vec3 tint = mix(spectrum(l.z), vec3(1.), .15);
+        // Mixing toward the light's colour, rather than adding, keeps it vivid on pale skies too.
+        col = mix(col, tint, clamp(reach * lit * (1. - .7 * shadow(s, l.xy, lift)), 0., .6));
+      }
+
+      // Each wave carries a band of colour; the letters catch it on their edges.
+      for (int i = 0; i < WAVES; i++) {
+        vec2 toward;
+        float c = crest(uWaves[i], p, toward);
+        if (c <= 0.) continue;
+        float blocked = texture2D(uText, s + toward * SHADOW_REACH).b * uRise * (1. - lift);
+        vec3 tint = mix(spectrum(uWaves[i].w), vec3(1.), .15);
+        col = mix(col, tint, clamp(c * (.25 + rim * 2.) * (1. - .7 * blocked), 0., .5));
+      }
+
+      col *= 1. - .18 * dot(p, p);
+      gl_FragColor = vec4(col, 1.);
+    }`;
+
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(s);
+    return s;
+  }
+
+  // Builds everything the graphics card holds. Runs again if the context is lost and restored.
+  let u;
+  function setUp() {
+    const prog = gl.createProgram();
+    gl.attachShader(prog, compile(gl.VERTEX_SHADER, vert));
+    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, frag));
+    gl.bindAttribLocation(prog, 0, "p");
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw gl.getProgramInfoLog(prog);
+    gl.useProgram(prog);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+    u = {};
+    for (const name of ["uRes", "uTime", "uPointer", "uLights", "uWaves", "uSky", "uRise", "uText"]) {
+      u[name] = gl.getUniformLocation(prog, name);
+    }
+
+    gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.uniform1i(u.uText, 0);
+  }
+  try {
+    setUp();
+  } catch (e) {
+    return fallBack();
+  }
+
+  // The words become a height map: crisp shape, soft bevel and shadow in three channels.
+  const text = document.createElement("canvas");
+  const tctx = text.getContext("2d");
+  let scale = 1;
+  function drawText() {
+    const w = text.width = canvas.width, h = text.height = canvas.height;
+    // Upright screens stack the words, breaking after the comma.
+    const lines = portrait.matches ? WORDS.split(" ") : [WORDS];
+    tctx.font = font(100);
+    const widest = Math.max(...lines.map(line => tctx.measureText(line).width));
+    const size = Math.min(150 * scale, h * .2, (w * .666) / widest * 100);
+    const lead = size * 1.05;
+    const top = h / 2 - (lines.length - 1) * lead / 2;
+
+    tctx.fillStyle = "#000";
+    tctx.fillRect(0, 0, w, h);
+    tctx.globalCompositeOperation = "lighter";
+    tctx.font = font(size);
+    tctx.textAlign = "center";
+    tctx.textBaseline = "middle";
+    // Each channel is a shadow of the words drawn off-canvas, blurred by a different amount.
+    // Even the crisp one is softened slightly: a hard edge lights up as stair steps on diagonals.
+    for (const [color, blur] of [["rgb(255,0,0)", .01125], ["rgb(0,255,0)", .06], ["rgb(0,0,255)", .12]]) {
+      tctx.shadowColor = color;
+      tctx.shadowBlur = size * blur;
+      tctx.shadowOffsetX = w * 2;
+      lines.forEach((line, i) => tctx.fillText(line, w / 2 - w * 2, top + i * lead));
+    }
+    tctx.shadowColor = "transparent";
+    tctx.globalCompositeOperation = "source-over";
+
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, text);
+  }
+
+  // Positions are fractions of the screen, y up, so they survive resizing.
+  const pointer = { x: .35, y: .7, tx: .35, ty: .7, lastMove: -Infinity };
+  const lights = new Float32Array(LIGHTS * 3);
+  const waves = new Float32Array(WAVES * 4).fill(-100);
+  let nextWave = 0;
+  let nextHue = Math.random();
+  let clock = 0;
+  let riseStart = null;
+
+  let redraw;
+  function resize() {
+    scale = Math.min(devicePixelRatio || 1, MAX_SCALE);
+    canvas.width = Math.round(innerWidth * scale);
+    canvas.height = Math.round(innerHeight * scale);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    // Until the words start rising there is nothing to redraw.
+    if (riseStart !== null) {
+      clearTimeout(redraw);
+      redraw = setTimeout(drawText, 150);
+    }
+  }
+  addEventListener("resize", resize);
+  resize();
+
+  // Once the typeface is ready, the words rise slowly out of the surface.
+  const startRise = () => {
+    if (riseStart !== null) return;
+    drawText();
+    riseStart = performance.now() + 300;
+  };
+  (document.fonts ? document.fonts.load(font(100)) : Promise.reject()).then(startRise, startRise);
+  setTimeout(startRise, 3000);
+
+  // Phones can take the graphics away while the page is in the background.
+  // Show the plain text meanwhile, and rebuild everything when it comes back.
+  canvas.addEventListener("webglcontextlost", e => {
+    e.preventDefault();
+    root.classList.remove("gl");
+  });
+  canvas.addEventListener("webglcontextrestored", () => {
+    try {
+      setUp();
+    } catch (e) {
+      return fallBack();
+    }
+    resize();
+    clearTimeout(redraw);
+    if (riseStart !== null) drawText();
+    root.classList.add("gl");
+  });
+
+  function screenPoint(e) {
+    return [e.clientX / innerWidth, 1 - e.clientY / innerHeight];
+  }
+  addEventListener("pointermove", e => {
+    [pointer.tx, pointer.ty] = screenPoint(e);
+    pointer.lastMove = performance.now();
+  });
+  addEventListener("pointerdown", e => {
+    const [x, y] = screenPoint(e);
+    pointer.tx = x; pointer.ty = y;
+    pointer.lastMove = performance.now();
+    waves.set([x, y, clock, nextHue], nextWave * 4);
+    nextWave = (nextWave + 1) % WAVES;
+    nextHue = (nextHue + .382) % 1;
+  });
+
+  function updateLights() {
+    for (let i = 0; i < LIGHTS; i++) {
+      const a = clock * (.045 + i * .012) + i * 2.1;
+      lights.set([.5 + .4 * Math.sin(a), .5 + .36 * Math.sin(a * 1.31 + i), i / LIGHTS + clock * .01], i * 3);
+    }
+  }
+
+  const smooth = k => k * k * (3 - 2 * k);
+  const clamp01 = k => Math.min(Math.max(k, 0), 1);
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(now - last, 50) / 1000 * speed;
+    clock += dt;
+    last = now;
+
+    if (now - pointer.lastMove > IDLE_AFTER) {
+      pointer.tx = .5 + .32 * Math.sin(clock * .11);
+      pointer.ty = .5 + .26 * Math.sin(clock * .15 + 1.3);
+    }
+    pointer.x += (pointer.tx - pointer.x) * .045;
+    pointer.y += (pointer.ty - pointer.y) * .045;
+    updateLights();
+
+    gl.uniform2f(u.uRes, canvas.width, canvas.height);
+    gl.uniform1f(u.uTime, clock);
+    gl.uniform2f(u.uPointer, pointer.x, pointer.y);
+    gl.uniform3fv(u.uLights, lights);
+    gl.uniform4fv(u.uWaves, waves);
+    gl.uniform3fv(u.uSky, sky);
+    gl.uniform1f(u.uRise, riseStart === null ? 0 : smooth(clamp01((now - riseStart) / RISE_TIME)));
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    requestAnimationFrame(frame);
+  }
+  root.classList.add("gl");
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
 </html>
