@@ -474,14 +474,20 @@
     for (const letter of letters) {
       paint(octx, ORDER_SCALE, [[.12, "#fff"]], [letter]);
       const weights = octx.getImageData(0, 0, ow, oh).data;
-      for (let p = 0; p < sums.length; p += 2) {
-        sums[p] += weights[p * 2] * letter.when;
-        sums[p + 1] += weights[p * 2];
+      const cx = letter.mid * ORDER_SCALE, cy = letter.y * ORDER_SCALE, reach = size * ORDER_SCALE;
+      for (let y = 0, p = 0; y < oh; y++) {
+        for (let x = 0; x < ow; x++, p += 2) {
+          // The nearest letter always counts a little, even beyond its shadow, so every point has
+          // a time. A point with none would rise at the start, outlining the letters early.
+          const weight = weights[p * 2] + .1 / (1 + ((x - cx) ** 2 + (y - cy) ** 2) / reach ** 2);
+          sums[p] += weight * letter.when;
+          sums[p + 1] += weight;
+        }
       }
     }
     const times = octx.createImageData(ow, oh);
     for (let p = 0; p < sums.length; p += 2) {
-      times.data[p * 2] = sums[p + 1] && 255 * sums[p] / sums[p + 1];
+      times.data[p * 2] = 255 * sums[p] / sums[p + 1];
       times.data[p * 2 + 3] = 255;
     }
     octx.putImageData(times, 0, 0);
