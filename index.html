@@ -114,7 +114,10 @@
   const LIGHTS = 3;          // coloured lights that always wander
   const WAVES = touch ? 10 : 20;     // most colour waves rolling at once
   const IDLE_AFTER = 5000;   // ms without input before the key light drifts on its own
-  const RISE_TIME = 3000;    // ms for the words to rise out of the surface
+  const LETTER_TIME = 2800;  // ms for each letter to rise out of the surface
+  const SPREAD = 3600;       // ms from the first letter starting to rise to the last
+  const PAUSE = 400;         // ms of that spent pausing between words
+  const LETTERS = WORDS.replace(/ /g, "").length;
 
   const root = document.documentElement;
   const canvas = document.getElementById("field");
@@ -181,6 +184,7 @@
     #endif
     #define LIGHTS ${LIGHTS}
     #define WAVES ${WAVES}
+    #define LETTERS ${LETTERS}
 
     // Positions are fractions of the screen, y up.
     uniform vec2 uRes;
@@ -189,8 +193,12 @@
     uniform vec3 uLights[LIGHTS];   // x, y, hue
     uniform vec4 uWaves[WAVES];     // x, y, start time, hue
     uniform vec3 uSky;
-    uniform float uRise;
-    uniform sampler2D uText;        // r: crisp letters, g: soft bevel, b: shadow
+    uniform float uRise;            // seconds since the words began rising; negative before
+    uniform sampler2D uText1;       // alternate letters, so neighbours are never in the same map:
+    uniform sampler2D uText2;       //   r: crisp letters, g: soft bevel, b: shadow
+    uniform vec4 uInk[LETTERS];     // where each letter is drawn, in pixels: left, bottom, right, top
+    uniform float uWhen[LETTERS];   // seconds after the first letter that each letter rises
+    uniform float uSweep;           // seconds the rise takes to sweep across a pixel
 
     const vec3 VIEW = vec3(0., 0., 1.);
     const float FOLD_DEPTH = .15;
@@ -202,6 +210,13 @@
     const float WAVE_WIDTH = 28.;
     const float WAVE_SPEED = .45;
     const float WAVE_LIFE = 5.;
+    const float LETTER_TIME = ${LETTER_TIME / 1000};
+    const float SPREAD = ${SPREAD / 1000};
+    const float POP = .7;
+    const float MOUND_DEPTH = .02;
+    const float RIPPLE_DEPTH = .006;
+    const float RIPPLE_START = .2;   // the rings start once the letter has broken the surface,
+    const float RIPPLE_END = .69;    //   and die away before it settles
 
     vec2 toSpace(vec2 px) { return (px - .5 * uRes) / min(uRes.x, uRes.y); }
     vec2 fromScreen(vec2 f) { return toSpace(f * uRes); }
@@ -225,9 +240,61 @@
       return exp(-(x - front) * (x - front) * 4.);
     }
 
-    float letters(vec2 s) {
-      vec3 c = texture2D(uText, s).rgb;
-      return (c.r * .35 + c.g * .65) * uRise;
+    // How far a letter rising at when has got, from 0 to 1, some pixels right of its middle.
+    // The sweep carries on across each letter at the same pace as between them, so it moves
+    // along the words steadily, pausing only between them. Each point eases in as well as out,
+    // so the sweep has a soft edge rather than a line.
+    float phase(float when, float right) {
+      return smoothstep(0., 1., (uRise - when - right * uSweep) / LETTER_TIME);
+    }
+
+    // Each letter comes up past its full height, then settles back.
+    float risen(float k) {
+      float j = 1. - k;
+      return 1. - j * j * j + POP * sin(3.14159 * k) * k;
+    }
+
+    // The liquid bulges over each letter before it breaks through, then rings spread out from it.
+    float wake(vec3 c, float k) {
+      float mound = sin(3.14159 * min(k * 1.6, 1.)) * MOUND_DEPTH;
+      float r = clamp((k - RIPPLE_START) / (RIPPLE_END - RIPPLE_START), 0., 1.);
+      // Quick to swell, then a long, easing fade.
+      float fade = smoothstep(0., .2, r) * (1. - r) * (1. - r) * 1.5;
+      float rings = sin(c.b * 18. + k * 16.) * fade * (1. - c.g) * RIPPLE_DEPTH;
+      return c.b * (mound + rings);
+    }
+
+    // Letters from one map: x their height, y the liquid stirred around them, z how much they shade
+    // what lies beside them.
+    vec3 letters(vec3 c, float k) {
+      return vec3((c.r * .35 + c.g * .65) * risen(k), wake(c, k), c.b * risen(k));
+    }
+
+    // Each point rises on the time of the nearest letter in each map. Letters in the same map are
+    // never close enough for their shadows to meet, so it switches from one to the next unseen.
+    // Returns, for each map, that letter's time (x, y) and middle (z, w). It is found once per
+    // pixel and shared by the points sampled around it, and not at all before or after the rise.
+    vec4 nearest(vec2 px) {
+      if (uRise < 0.) return vec4(99., 99., 0., 0.);
+      if (uRise > SPREAD + LETTER_TIME + 1.) return vec4(-99., -99., 0., 0.);
+      vec2 best = vec2(1e9), when = vec2(0.), mid = vec2(0.);
+      for (int i = 0; i < LETTERS; i++) {
+        vec2 gap = max(max(uInk[i].xy - px, px - uInk[i].zw), 0.);
+        float d = dot(gap, gap);
+        float centre = (uInk[i].x + uInk[i].z) / 2.;
+        if (mod(float(i), 2.) < .5) {
+          if (d < best.x) { best.x = d; when.x = uWhen[i]; mid.x = centre; }
+        } else if (d < best.y) {
+          best.y = d; when.y = uWhen[i]; mid.y = centre;
+        }
+      }
+      return vec4(when, mid);
+    }
+
+    vec3 raised(vec2 s, vec4 near) {
+      float x = s.x * uRes.x;
+      return letters(texture2D(uText1, s).rgb, phase(near.x, x - near.z))
+           + letters(texture2D(uText2, s).rgb, phase(near.y, x - near.w));
     }
 
     // A click sends one broad swell rolling out to the edges of the screen.
@@ -244,18 +311,20 @@
            * (1. - smoothstep(WAVE_LIFE * .5, WAVE_LIFE, age));
     }
 
-    float surface(vec2 px, float fold) {
+    float surface(vec2 px, float fold, vec4 near) {
       vec2 p = toSpace(px);
-      float h = fold * FOLD_DEPTH + swell(p) * SWELL_DEPTH + letters(px / uRes) * LETTER_DEPTH;
+      vec3 r = raised(px / uRes, near);
+      float h = fold * FOLD_DEPTH + swell(p) * SWELL_DEPTH + r.x * LETTER_DEPTH + r.y;
       vec2 toward;
       for (int i = 0; i < WAVES; i++) h += crest(uWaves[i], p, toward) * WAVE_DEPTH;
       return h;
     }
 
     // How much the raised letters block a light at screen position light from reaching this point.
-    float shadow(vec2 s, vec2 light, float lift) {
+    float shadow(vec2 s, vec2 light, float lift, vec4 near) {
       vec2 d = light - s;
-      return texture2D(uText, s + d / (length(d) + .05) * SHADOW_REACH).b * uRise * (1. - lift);
+      vec2 at = s + d / (length(d) + .05) * SHADOW_REACH;
+      return raised(at, near).z * (1. - lift);
     }
 
     void main() {
@@ -265,12 +334,13 @@
       float e = 1.5;
       float unit = e / min(uRes.x, uRes.y);
 
+      vec4 near = nearest(px);
       float fold = folds(p);
-      float h = surface(px, fold);
-      float hx = surface(px + vec2(e, 0.), folds(toSpace(px + vec2(e, 0.))));
-      float hy = surface(px + vec2(0., e), folds(toSpace(px + vec2(0., e))));
+      float h = surface(px, fold, near);
+      float hx = surface(px + vec2(e, 0.), folds(toSpace(px + vec2(e, 0.))), near);
+      float hy = surface(px + vec2(0., e), folds(toSpace(px + vec2(0., e))), near);
       vec3 n = normalize(vec3(-(hx - h) / unit, -(hy - h) / unit, 1.));
-      float lift = letters(s);
+      float lift = raised(s, near).x;
 
       // Key light: white, hovering above the pointer.
       vec3 key = vec3(fromScreen(uPointer), .75);
@@ -284,7 +354,7 @@
       col = mix(col, film, clamp(.2 + rim * 1.1, 0., .5));
       col = mix(col, vec3(1.), lift * .12);
       col += spec * .3;
-      col *= 1. - .22 * shadow(s, uPointer, lift);
+      col *= 1. - .22 * shadow(s, uPointer, lift, near);
       col += film * exp(-dot(p - key.xy, p - key.xy) * 4.) * .06;
 
       // Coloured lights skim low over the surface, so the letters cast long shadows.
@@ -296,7 +366,7 @@
         float lit = max(dot(n, Li), 0.) * .5 + pow(max(dot(reflect(-Li, n), VIEW), 0.), 24.) * .2;
         vec3 tint = mix(spectrum(l.z), vec3(1.), .15);
         // Mixing toward the light's colour, rather than adding, keeps it vivid on pale skies too.
-        col = mix(col, tint, clamp(reach * lit * (1. - .7 * shadow(s, l.xy, lift)), 0., .6));
+        col = mix(col, tint, clamp(reach * lit * (1. - .7 * shadow(s, l.xy, lift, near)), 0., .6));
       }
 
       // Each wave carries a band of colour; the letters catch it on their edges.
@@ -304,7 +374,8 @@
         vec2 toward;
         float c = crest(uWaves[i], p, toward);
         if (c <= 0.) continue;
-        float blocked = texture2D(uText, s + toward * SHADOW_REACH).b * uRise * (1. - lift);
+        vec2 at = s + toward * SHADOW_REACH;
+        float blocked = raised(at, near).z * (1. - lift);
         vec3 tint = mix(spectrum(uWaves[i].w), vec3(1.), .15);
         col = mix(col, tint, clamp(c * (.25 + rim * 2.) * (1. - .7 * blocked), 0., .5));
       }
@@ -338,17 +409,21 @@
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
     u = {};
-    for (const name of ["uRes", "uTime", "uPointer", "uLights", "uWaves", "uSky", "uRise", "uText"]) {
+    for (const name of ["uRes", "uTime", "uPointer", "uLights", "uWaves", "uSky", "uRise", "uText1", "uText2", "uInk", "uWhen", "uSweep"]) {
       u[name] = gl.getUniformLocation(prog, name);
     }
 
-    gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.uniform1i(u.uText, 0);
+    for (const unit of [0, 1]) {
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    }
+    gl.uniform1i(u.uText1, 0);
+    gl.uniform1i(u.uText2, 1);
   }
   try {
     setUp();
@@ -356,7 +431,7 @@
     return fallBack();
   }
 
-  // The words become a height map: crisp shape, soft bevel and shadow in three channels.
+  // The words become height maps: crisp shape, soft bevel and shadow in three channels.
   const text = document.createElement("canvas");
   const tctx = text.getContext("2d");
   let scale = 1;
@@ -370,24 +445,58 @@
     const lead = size * 1.05;
     const top = h / 2 - (lines.length - 1) * lead / 2;
 
-    tctx.fillStyle = "#000";
-    tctx.fillRect(0, 0, w, h);
-    tctx.globalCompositeOperation = "lighter";
+    // Where each letter sits, and whether it starts a word: after a space, or on a later line.
     tctx.font = font(size);
-    tctx.textAlign = "center";
     tctx.textBaseline = "middle";
-    // Each channel is a shadow of the words drawn off-canvas, blurred by a different amount.
-    // Even the crisp one is softened slightly: a hard edge lights up as stair steps on diagonals.
-    for (const [color, blur] of [["rgb(255,0,0)", .01125], ["rgb(0,255,0)", .06], ["rgb(0,0,255)", .12]]) {
-      tctx.shadowColor = color;
-      tctx.shadowBlur = size * blur;
-      tctx.shadowOffsetX = w * 2;
-      lines.forEach((line, i) => tctx.fillText(line, w / 2 - w * 2, top + i * lead));
-    }
-    tctx.shadowColor = "transparent";
-    tctx.globalCompositeOperation = "source-over";
+    const letters = lines.flatMap((line, i) => {
+      const start = w / 2 - tctx.measureText(line).width / 2;
+      return [...line].flatMap((char, j) => {
+        if (char === " ") return [];
+        const x = start + tctx.measureText(line.slice(0, j)).width;
+        const y = top + i * lead;
+        const ink = tctx.measureText(char);
+        const left = x - ink.actualBoundingBoxLeft, right = x + ink.actualBoundingBoxRight;
+        const box = [left, h - y - ink.actualBoundingBoxDescent, right, h - y + ink.actualBoundingBoxAscent];
+        return [{ char, x, y, box, mid: (left + right) / 2, newWord: j ? line[j - 1] === " " : i > 0 }];
+      });
+    });
 
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, text);
+    // The letters rise in a steady sweep along each word, starting as it reaches their middles,
+    // so a narrow letter follows sooner than a wide one. The sweep pauses between words.
+    let along = 0, pauses = 0;
+    letters.forEach((letter, n) => {
+      if (letter.newWord) pauses++;
+      else if (n) along += letter.mid - letters[n - 1].mid;
+      Object.assign(letter, { along, pauses });
+    });
+    const sweep = (SPREAD - pauses * PAUSE) / along / 1000;   // seconds per pixel
+    gl.uniform4fv(u.uInk, letters.flatMap(letter => letter.box));
+    gl.uniform1fv(u.uWhen, letters.map(letter => letter.along * sweep + letter.pauses * PAUSE / 1000));
+    gl.uniform1f(u.uSweep, sweep);
+
+    // Each channel is a shadow of the letters drawn off-canvas, blurred by a different amount,
+    // and added up. Even the crisp one is softened slightly: a hard edge lights up as stair
+    // steps on diagonals.
+    function paint(which) {
+      tctx.globalCompositeOperation = "source-over";
+      tctx.fillStyle = "#000";
+      tctx.fillRect(0, 0, w, h);
+      tctx.globalCompositeOperation = "lighter";
+      tctx.shadowOffsetX = w * 2;
+      for (const [blur, colour] of [[.01125, "#f00"], [.06, "#0f0"], [.12, "#00f"]]) {
+        tctx.shadowColor = colour;
+        tctx.shadowBlur = size * blur;
+        for (const letter of which) tctx.fillText(letter.char, letter.x - w * 2, letter.y);
+      }
+    }
+
+    // Alternate letters go in separate maps, so each letter's bevel, bulge, ripples and shadow
+    // rise on its own time, even where they spread over its neighbours.
+    for (const g of [0, 1]) {
+      paint(letters.filter((letter, n) => n % 2 === g));
+      gl.activeTexture(gl.TEXTURE0 + g);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, text);
+    }
   }
 
   // Positions are fractions of the screen, y up, so they survive resizing.
@@ -464,8 +573,6 @@
     }
   }
 
-  const smooth = k => k * k * (3 - 2 * k);
-  const clamp01 = k => Math.min(Math.max(k, 0), 1);
   let last = performance.now();
   function frame(now) {
     const dt = Math.min(now - last, 50) / 1000 * speed;
@@ -486,7 +593,7 @@
     gl.uniform3fv(u.uLights, lights);
     gl.uniform4fv(u.uWaves, waves);
     gl.uniform3fv(u.uSky, sky);
-    gl.uniform1f(u.uRise, riseStart === null ? 0 : smooth(clamp01((now - riseStart) / RISE_TIME)));
+    gl.uniform1f(u.uRise, riseStart === null ? -1 : (now - riseStart) / 1000);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     requestAnimationFrame(frame);
   }
