@@ -117,13 +117,14 @@
   const IDLE_AFTER = 5000;   // ms without input before the key light drifts on its own
   const RISE_TIME = 3000;    // ms for the words to rise out of the surface
 
+  const root = document.documentElement;
   const canvas = document.getElementById("field");
   const gl = canvas.getContext("webgl", { antialias: false, alpha: false });
   const portrait = matchMedia("(orientation: portrait)");
   const speed = matchMedia("(prefers-reduced-motion: reduce)").matches ? .3 : 1;
-  const fallBack = () => document.documentElement.classList.add("no-gl");
+  const fallBack = () => root.classList.add("no-gl");
 
-  // The surface colour follows the viewer's local time of day.
+  // The surface colour, and the browser toolbar's, follow the viewer's local time of day.
   const SKY = [
     [0,    [0.055, 0.060, 0.105]],  // midnight ink
     [5,    [0.110, 0.105, 0.190]],  // pre-dawn
@@ -134,6 +135,7 @@
     [22,   [0.085, 0.085, 0.150]],  // night
     [24,   [0.055, 0.060, 0.105]],
   ];
+  const toolbar = document.querySelector('meta[name="theme-color"]');
   function skyNow() {
     const d = new Date();
     const h = d.getHours() + d.getMinutes() / 60;
@@ -142,8 +144,9 @@
     const [h0, a] = SKY[i], [h1, b] = SKY[i + 1];
     const k = (h - h0) / (h1 - h0);
     const s = a.map((v, j) => v + (b[j] - v) * k);
-    document.documentElement.style.setProperty("--sky",
-      `rgb(${s.map(v => Math.round(v * 255)).join(",")})`);
+    const css = `rgb(${s.map(v => Math.round(v * 255)).join(",")})`;
+    root.style.setProperty("--sky", css);
+    toolbar.content = css;
     return s;
   }
   let sky = skyNow();
@@ -161,11 +164,12 @@
     #define LIGHTS ${LIGHTS}
     #define WAVES ${WAVES}
 
+    // Positions are fractions of the screen, y up.
     uniform vec2 uRes;
     uniform float uTime;
     uniform vec2 uPointer;
-    uniform vec4 uLights[LIGHTS];   // x, y in pixels; strength; hue
-    uniform vec4 uWaves[WAVES];     // x, y in pixels; start time; hue
+    uniform vec3 uLights[LIGHTS];   // x, y, hue
+    uniform vec4 uWaves[WAVES];     // x, y, start time, hue
     uniform vec3 uSky;
     uniform float uRise;
     uniform sampler2D uText;        // r: crisp letters, g: soft bevel, b: shadow
@@ -175,12 +179,14 @@
     const float SWELL_DEPTH = .08;
     const float LETTER_DEPTH = .012;
     const float SHADOW_REACH = .012;
+    const float LIGHT_STRENGTH = .5;
     const float WAVE_DEPTH = .07;
     const float WAVE_WIDTH = 28.;
     const float WAVE_SPEED = .45;
     const float WAVE_LIFE = 5.;
 
     vec2 toSpace(vec2 px) { return (px - .5 * uRes) / min(uRes.x, uRes.y); }
+    vec2 fromScreen(vec2 f) { return toSpace(f * uRes); }
     vec3 spectrum(float t) { return .5 + .5 * cos(6.28318 * (t + vec3(0., .33, .67))); }
 
     // Long, slow folds, like silk under water. Their depth breathes over time.
@@ -212,7 +218,7 @@
       toward = vec2(0.);
       float age = uTime - w.z;
       if (age < 0. || age > WAVE_LIFE) return 0.;
-      vec2 r = p - toSpace(w.xy);
+      vec2 r = p - fromScreen(w.xy);
       float dist = sqrt(dot(r, r) + .002);   // softened so the centre has no sharp point
       float d = dist - age * WAVE_SPEED;
       toward = -sign(d) * r / dist;
@@ -228,9 +234,9 @@
       return h;
     }
 
-    // How much the raised letters block a light at lightPx from reaching this point.
-    float shadow(vec2 s, vec2 lightPx, float lift) {
-      vec2 d = lightPx / uRes - s;
+    // How much the raised letters block a light at screen position light from reaching this point.
+    float shadow(vec2 s, vec2 light, float lift) {
+      vec2 d = light - s;
       return texture2D(uText, s + d / (length(d) + .05) * SHADOW_REACH).b * uRise * (1. - lift);
     }
 
@@ -249,7 +255,7 @@
       float lift = letters(s);
 
       // Key light: white, hovering above the pointer.
-      vec3 key = vec3(toSpace(uPointer), .75);
+      vec3 key = vec3(fromScreen(uPointer), .75);
       vec3 L = normalize(key - vec3(p, h));
       float diff = dot(n, L) * .5 + .5;
       float spec = pow(max(dot(reflect(-L, n), VIEW), 0.), 70.);
@@ -265,13 +271,12 @@
 
       // Coloured lights skim low over the surface, so the letters cast long shadows.
       for (int i = 0; i < LIGHTS; i++) {
-        vec4 l = uLights[i];
-        if (l.z <= 0.) continue;
-        vec3 to = vec3(toSpace(l.xy), .3) - vec3(p, h);
+        vec3 l = uLights[i];
+        vec3 to = vec3(fromScreen(l.xy), .3) - vec3(p, h);
         vec3 Li = normalize(to);
-        float reach = l.z / (1. + dot(to.xy, to.xy) * 14.);
+        float reach = LIGHT_STRENGTH / (1. + dot(to.xy, to.xy) * 14.);
         float lit = max(dot(n, Li), 0.) * .5 + pow(max(dot(reflect(-Li, n), VIEW), 0.), 24.) * .2;
-        vec3 tint = mix(spectrum(l.w), vec3(1.), .15);
+        vec3 tint = mix(spectrum(l.z), vec3(1.), .15);
         // Mixing toward the light's colour, rather than adding, keeps it vivid on pale skies too.
         col = mix(col, tint, clamp(reach * lit * (1. - .7 * shadow(s, l.xy, lift)), 0., .6));
       }
@@ -297,39 +302,45 @@
     if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(s);
     return s;
   }
-  let prog;
-  try {
-    prog = gl.createProgram();
+
+  // Builds everything the graphics card holds. Runs again if the context is lost and restored.
+  let u;
+  function setUp() {
+    const prog = gl.createProgram();
     gl.attachShader(prog, compile(gl.VERTEX_SHADER, vert));
     gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, frag));
+    gl.bindAttribLocation(prog, 0, "p");
     gl.linkProgram(prog);
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw gl.getProgramInfoLog(prog);
+    gl.useProgram(prog);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+    u = {};
+    for (const name of ["uRes", "uTime", "uPointer", "uLights", "uWaves", "uSky", "uRise", "uText"]) {
+      u[name] = gl.getUniformLocation(prog, name);
+    }
+
+    gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.uniform1i(u.uText, 0);
+  }
+  try {
+    setUp();
   } catch (e) {
     return fallBack();
-  }
-  gl.useProgram(prog);
-
-  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-
-  const u = {};
-  for (const name of ["uRes", "uTime", "uPointer", "uLights", "uWaves", "uSky", "uRise", "uText"]) {
-    u[name] = gl.getUniformLocation(prog, name);
   }
 
   // The words become a height map: crisp shape, soft bevel and shadow in three channels.
   const text = document.createElement("canvas");
   const tctx = text.getContext("2d");
-  gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.uniform1i(u.uText, 0);
-
   let scale = 1;
   function drawText() {
     const w = text.width = canvas.width, h = text.height = canvas.height;
@@ -361,21 +372,31 @@
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, text);
   }
 
+  // Positions are fractions of the screen, y up, so they survive resizing.
+  const pointer = { x: .35, y: .7, tx: .35, ty: .7, lastMove: -Infinity };
+  const lights = new Float32Array(LIGHTS * 3);
+  const waves = new Float32Array(WAVES * 4).fill(-100);
+  let nextWave = 0;
+  let nextHue = Math.random();
+  let clock = 0;
+  let riseStart = null;
+
   let redraw;
   function resize() {
     scale = Math.min(devicePixelRatio || 1, MAX_SCALE);
     canvas.width = Math.round(innerWidth * scale);
     canvas.height = Math.round(innerHeight * scale);
     gl.viewport(0, 0, canvas.width, canvas.height);
-    clearTimeout(redraw);
-    redraw = setTimeout(drawText, 150);
+    // Until the words start rising there is nothing to redraw.
+    if (riseStart !== null) {
+      clearTimeout(redraw);
+      redraw = setTimeout(drawText, 150);
+    }
   }
   addEventListener("resize", resize);
   resize();
-  drawText();
 
   // Once the typeface is ready, the words rise slowly out of the surface.
-  let riseStart = null;
   const startRise = () => {
     if (riseStart !== null) return;
     drawText();
@@ -384,12 +405,23 @@
   (document.fonts ? document.fonts.load(font(100)) : Promise.reject()).then(startRise, startRise);
   setTimeout(startRise, 3000);
 
-  // Positions are fractions of the screen, y up, so they survive resizing.
-  const pointer = { x: .35, y: .7, tx: .35, ty: .7, lastMove: -Infinity };
-  const waves = new Float32Array(WAVES * 4).fill(-100);
-  let nextWave = 0;
-  let nextHue = Math.random();
-  let clock = 0;
+  // Phones can take the graphics away while the page is in the background.
+  // Show the plain text meanwhile, and rebuild everything when it comes back.
+  canvas.addEventListener("webglcontextlost", e => {
+    e.preventDefault();
+    root.classList.remove("gl");
+  });
+  canvas.addEventListener("webglcontextrestored", () => {
+    try {
+      setUp();
+    } catch (e) {
+      return fallBack();
+    }
+    resize();
+    clearTimeout(redraw);
+    if (riseStart !== null) drawText();
+    root.classList.add("gl");
+  });
 
   function screenPoint(e) {
     return [e.clientX / innerWidth, 1 - e.clientY / innerHeight];
@@ -402,25 +434,20 @@
     const [x, y] = screenPoint(e);
     pointer.tx = x; pointer.ty = y;
     pointer.lastMove = performance.now();
-    waves.set([x * canvas.width, y * canvas.height, clock, nextHue], nextWave * 4);
+    waves.set([x, y, clock, nextHue], nextWave * 4);
     nextWave = (nextWave + 1) % WAVES;
     nextHue = (nextHue + .382) % 1;
   });
 
-  const lights = new Float32Array(LIGHTS * 4);
-  const smooth = k => k * k * (3 - 2 * k);
-  const clamp01 = k => Math.min(Math.max(k, 0), 1);
-  function setLight(i, x, y, strength, hue) {
-    lights.set([x * canvas.width, y * canvas.height, strength, hue], i * 4);
-  }
-
   function updateLights() {
     for (let i = 0; i < LIGHTS; i++) {
       const a = clock * (.045 + i * .012) + i * 2.1;
-      setLight(i, .5 + .4 * Math.sin(a), .5 + .36 * Math.sin(a * 1.31 + i), .5, i / LIGHTS + clock * .01);
+      lights.set([.5 + .4 * Math.sin(a), .5 + .36 * Math.sin(a * 1.31 + i), i / LIGHTS + clock * .01], i * 3);
     }
   }
 
+  const smooth = k => k * k * (3 - 2 * k);
+  const clamp01 = k => Math.min(Math.max(k, 0), 1);
   let last = performance.now();
   function frame(now) {
     const dt = Math.min(now - last, 50) / 1000 * speed;
@@ -437,15 +464,15 @@
 
     gl.uniform2f(u.uRes, canvas.width, canvas.height);
     gl.uniform1f(u.uTime, clock);
-    gl.uniform2f(u.uPointer, pointer.x * canvas.width, pointer.y * canvas.height);
-    gl.uniform4fv(u.uLights, lights);
+    gl.uniform2f(u.uPointer, pointer.x, pointer.y);
+    gl.uniform3fv(u.uLights, lights);
     gl.uniform4fv(u.uWaves, waves);
     gl.uniform3fv(u.uSky, sky);
     gl.uniform1f(u.uRise, riseStart === null ? 0 : smooth(clamp01((now - riseStart) / RISE_TIME)));
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     requestAnimationFrame(frame);
   }
-  document.documentElement.classList.add("gl");
+  root.classList.add("gl");
   requestAnimationFrame(frame);
 })();
 </script>
