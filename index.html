@@ -115,10 +115,8 @@
   const WAVES = touch ? 10 : 20;     // most colour waves rolling at once
   const IDLE_AFTER = 5000;   // ms without input before the key light drifts on its own
   const LETTER_TIME = 2800;  // ms for each letter to rise out of the surface
-  const GAP = 320;           // ms between letters starting to rise, on average
-  const PAUSE = 400;         // extra ms between words
-  const BREAKS = WORDS.split(" ").length - 1;
-  const SPREAD = (WORDS.length - BREAKS - 1) * GAP + BREAKS * PAUSE;   // ms from the first letter to the last
+  const SPREAD = 3600;       // ms from the first letter starting to rise to the last
+  const PAUSE = 400;         // ms of that spent pausing between words
 
   const root = document.documentElement;
   const canvas = document.getElementById("field");
@@ -283,8 +281,7 @@
     float surface(vec2 px, float fold) {
       vec2 p = toSpace(px);
       vec3 r = raised(px / uRes);
-      float h = fold * FOLD_DEPTH + swell(p) * SWELL_DEPTH
-              + r.x * LETTER_DEPTH + r.y;
+      float h = fold * FOLD_DEPTH + swell(p) * SWELL_DEPTH + r.x * LETTER_DEPTH + r.y;
       vec2 toward;
       for (int i = 0; i < WAVES; i++) h += crest(uWaves[i], p, toward) * WAVE_DEPTH;
       return h;
@@ -414,7 +411,6 @@
     gl.activeTexture(gl.TEXTURE0 + unit);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, source);
   };
-  const CRISP = .01125, BEVEL = .06, SHADOW = .12;   // blur, as a fraction of the type size
   let scale = 1;
   function drawText() {
     const w = text.width = canvas.width, h = text.height = canvas.height;
@@ -441,43 +437,42 @@
 
     // The letters rise in a steady sweep along each word, starting as it reaches their middles,
     // so a narrow letter follows sooner than a wide one. The sweep pauses between words.
-    let along = 0, breaks = 0;
+    let along = 0, pauses = 0;
     letters.forEach((letter, n) => {
-      if (letter.newWord) breaks++;
+      if (letter.newWord) pauses++;
       else if (n) along += letter.mid - letters[n - 1].mid;
-      Object.assign(letter, { along, breaks });
+      Object.assign(letter, { along, pauses });
     });
-    const sweep = (SPREAD - BREAKS * PAUSE) / along;   // ms per pixel
-    for (const letter of letters) letter.when = (letter.along * sweep + letter.breaks * PAUSE) / SPREAD;
+    for (const letter of letters) {
+      letter.when = (letter.along / along * (SPREAD - pauses * PAUSE) + letter.pauses * PAUSE) / SPREAD;
+    }
 
     // Each channel is a shadow of the letters drawn off-canvas, blurred by a different amount,
     // and added up. Even the crisp one is softened slightly: a hard edge lights up as stair
-    // steps on diagonals. Shadows ignore any scaling, so their blur and offset are scaled here.
-    function paint(ctx, layers, which) {
-      const zoom = ctx.getTransform().a;
+    // steps on diagonals. Shadows ignore scaling, so their blur and offset are scaled by hand.
+    function paint(ctx, zoom, layers, which = letters) {
+      ctx.setTransform(zoom, 0, 0, zoom, 0, 0);
       ctx.globalCompositeOperation = "source-over";
-      ctx.shadowColor = "transparent";
       ctx.fillStyle = "#000";
       ctx.fillRect(0, 0, w, h);
       ctx.globalCompositeOperation = "lighter";
       ctx.font = font(size);
       ctx.textBaseline = "middle";
       ctx.shadowOffsetX = w * 2 * zoom;
-      for (const [colour, blur] of layers) {
+      for (const [blur, colour] of layers) {
         ctx.shadowColor = colour;
         ctx.shadowBlur = size * blur * zoom;
         for (const letter of which) ctx.fillText(letter.char, letter.x - w * 2, letter.y);
       }
     }
-    paint(tctx, [["rgb(255,0,0)", CRISP], ["rgb(0,255,0)", BEVEL], ["rgb(0,0,255)", SHADOW]], letters);
+    paint(tctx, 1, [[.01125, "#f00"], [.06, "#0f0"], [.12, "#00f"]]);
     upload(0, text);
 
     // Weigh up each letter in turn, then divide out the weights.
     const ow = order.width = Math.ceil(w * ORDER_SCALE), oh = order.height = Math.ceil(h * ORDER_SCALE);
     const sums = new Float32Array(ow * oh * 2);   // time × weight, weight
-    octx.setTransform(ORDER_SCALE, 0, 0, ORDER_SCALE, 0, 0);
     for (const letter of letters) {
-      paint(octx, [["#fff", SHADOW]], [letter]);
+      paint(octx, ORDER_SCALE, [[.12, "#fff"]], [letter]);
       const weights = octx.getImageData(0, 0, ow, oh).data;
       for (let p = 0; p < sums.length; p += 2) {
         sums[p] += weights[p * 2] * letter.when;
